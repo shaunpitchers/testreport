@@ -1,0 +1,2 @@
+[console_scripts]
+testreport = testreport.cli.app:main
