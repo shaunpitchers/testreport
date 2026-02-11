@@ -17,7 +17,10 @@ src/testreport/core/energy.py
 src/testreport/core/plots.py
 src/testreport/core/temp_plots.py
 src/testreport/core/temp_stats.py
+src/testreport/gui/__init__.py
+src/testreport/gui/app.py
 src/testreport/io/__init__.py
 src/testreport/io/power_txt.py
 src/testreport/io/temp_csv.py
 src/testreport/standards/bsen22041/pipeline.py
+src/testreport/standards/bsen22041/runner.py

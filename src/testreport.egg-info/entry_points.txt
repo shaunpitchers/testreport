@@ -1,2 +1,3 @@
 [console_scripts]
 testreport = testreport.cli.app:main
+testreport-gui = testreport.gui.app:main

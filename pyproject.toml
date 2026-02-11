@@ -6,10 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "testreport"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["pandas>=2.0", "typer>=0.9"]
+dependencies = ["pandas>=2.0", "typer>=0.9","tzdata"]
 
 [project.scripts]
 testreport = "testreport.cli.app:main"
+testreport-gui = "testreport.gui.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

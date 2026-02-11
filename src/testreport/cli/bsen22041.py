@@ -1,92 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import datetime as dt
-import json
-
-import pandas as pd
 import typer
 
-from testreport.io.temp_csv import parse_temp_rh_csv
-from testreport.io.power_txt import parse_power_txt_si
-from testreport.core.align_bsen22041 import (
-    align_bsen22041_by_test_start,
-    export_aligned_windows,
-    export_qc_report,
-)
-from testreport.core.energy import compute_energy_results
-from testreport.core.ambient_gradient import compute_ambient_gradient
-from testreport.core.plots import (
-    plot_power,
-    plot_voltage_current,
-    plot_foodstuff_lines,
-    plot_foodstuff_min_max_mean,
-    plot_ambient_temps_and_rh,
-)
-from testreport.core.temp_stats import compute_column_stats
+from testreport.standards.bsen22041.runner import run_bsen22041
 
 app = typer.Typer(help="BS EN 22041 tools")
-
-
-def _detect_food_cols(df: pd.DataFrame, *, n: int = 8) -> list[str]:
-    cols = []
-    for i in range(1, n + 1):
-        c = str(i)
-        if c in df.columns:
-            cols.append(c)
-    return cols
-
-
-def _find_first_matching(df: pd.DataFrame, contains_any: list[str]) -> str | None:
-    for c in df.columns:
-        name = str(c).strip().lower()
-        if any(k in name for k in contains_any):
-            return c
-    return None
-
-
-def _detect_ambient_columns(
-    df: pd.DataFrame,
-    *,
-    ta_col: str | None,
-    ground_col: str | None,
-    ceiling_col: str | None,
-    rh_col: str | None,
-) -> tuple[str | None, str | None, str | None, str | None]:
-    cols = set(df.columns)
-
-    ta = ta_col if (ta_col and ta_col in cols) else None
-    g = ground_col if (ground_col and ground_col in cols) else None
-    c = ceiling_col if (ceiling_col and ceiling_col in cols) else None
-    rh = rh_col if (rh_col and rh_col in cols) else None
-
-    # Ta (room probe)
-    if ta is None:
-        ta = _find_first_matching(df, ["ta"])
-    if ta is None and "ROOM TEMP 1" in cols:
-        ta = "ROOM TEMP 1"
-    if ta is None:
-        ta = _find_first_matching(df, ["room temp", "ambient temp", "air temp"])
-
-    # Ground/Ceiling
-    if g is None:
-        if "Ground" in cols:
-            g = "Ground"
-        else:
-            g = _find_first_matching(df, ["ground"])
-    if c is None:
-        if "Ceiling" in cols:
-            c = "Ceiling"
-        else:
-            c = _find_first_matching(df, ["ceiling"])
-
-    # RH
-    if rh is None and "ROOM HUMIDITY 1" in cols:
-        rh = "ROOM HUMIDITY 1"
-    if rh is None:
-        rh = _find_first_matching(df, ["humidity", " rh", "rh"])
-
-    return ta, g, c, rh
 
 
 @app.command("align")
@@ -106,310 +25,55 @@ def align(
     coverage_max_missing_percent: float = typer.Option(
         0.5, "--coverage-max-missing-percent"
     ),
-    # Ambient plot column overrides
-    ta_col: str | None = typer.Option(
-        None, "--ta-col", help="Ambient room probe column (Ta) override"
-    ),
-    ground_col: str | None = typer.Option(
-        None, "--ground-col", help="Ambient ground probe column override"
-    ),
-    ceiling_col: str | None = typer.Option(
-        None, "--ceiling-col", help="Ambient ceiling probe column override"
-    ),
-    rh_col: str | None = typer.Option(
-        None, "--rh-col", help="Ambient RH column override"
-    ),
-    # Gradient
-    probe_distance_m: float = typer.Option(
-        2.5, "--probe-distance-m", help="Distance between ground and ceiling probes (m)"
-    ),
+    ta_col: str | None = typer.Option(None, "--ta-col"),
+    ground_col: str | None = typer.Option(None, "--ground-col"),
+    ceiling_col: str | None = typer.Option(None, "--ceiling-col"),
+    rh_col: str | None = typer.Option(None, "--rh-col"),
+    probe_distance_m: float = typer.Option(2.5, "--probe-distance-m"),
 ):
-    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = out_dir / stamp
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Parse temp: Excel-days numeric time (UTC) -> Europe/London
-    temp_df, temp_rep = parse_temp_rh_csv(
-        temp_file,
-        tz=tz,
-        numeric_time_is_utc=True,
-        time_base="excel_days",
-    )
-
-    # Parse power: timestamps are local clock time
-    power_df = parse_power_txt_si(
-        power_file,
-        tz=tz,
-    )
-
-    # Raw dt sanity (median)
-    temp_dt = pd.to_datetime(temp_df["time"], errors="coerce").diff().dropna()
-    power_dt = pd.to_datetime(power_df["time"], errors="coerce").diff().dropna()
-    temp_dt_med = temp_dt.median().total_seconds() if len(temp_dt) else float("nan")
-    power_dt_med = power_dt.median().total_seconds() if len(power_dt) else float("nan")
-    typer.echo(f"Median raw dt: temp={temp_dt_med:.1f}s, power={power_dt_med:.1f}s")
-
-    # Align windows
-    temp_w, power_w, qc = align_bsen22041_by_test_start(
-        temp_df,
-        power_df,
-        test_start_time=test_start,
+    result = run_bsen22041(
+        temp_file=temp_file,
+        power_file=power_file,
+        test_start=test_start,
+        out_dir=out_dir,
         tz=tz,
         resample_seconds=resample_seconds,
-    )
-
-    # Export aligned datasets + QC JSON
-    export_aligned_windows(temp_w, power_w, out_dir=run_dir, prefix=prefix, merge=True)
-    qc_path = export_qc_report(qc, run_dir / f"{prefix}_qc.json")
-
-    results_dir = run_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    # ----------------------------
-    # Coverage gate policy
-    # ----------------------------
-    max_missing = float(coverage_max_missing_percent) / 100.0
-
-    required_temp_windows = {
-        "stable_24h",
-        "test_48h",
-        "test_first_24h",
-        "test_last_24h",
-    }
-
-    # Power: stable_24h is irrelevant; only last 24h must be clean for energy.
-    required_power_windows = {"test_last_24h"}
-    warn_power_windows = {"test_48h", "test_first_24h"}
-
-    failed: list[str] = []
-
-    for wname in required_temp_windows:
-        miss = qc.temp_missing_frac.get(wname, 1.0)
-        if miss > max_missing:
-            failed.append(
-                f"Temp window {wname}: missing={miss * 100:.2f}% (limit {coverage_max_missing_percent:.2f}%)"
-            )
-
-    for wname in required_power_windows:
-        miss = qc.power_missing_frac.get(wname, 1.0)
-        if miss > max_missing:
-            failed.append(
-                f"Power window {wname}: missing={miss * 100:.2f}% (limit {coverage_max_missing_percent:.2f}%)"
-            )
-
-    for wname in sorted(warn_power_windows):
-        miss = qc.power_missing_frac.get(wname, None)
-        if miss is not None and miss > max_missing:
-            typer.echo(
-                f"Warning: Power window {wname} missing={miss * 100:.2f}% (limit {coverage_max_missing_percent:.2f}%)"
-            )
-
-    # ----------------------------
-    # Power results + plots (test_last_24h)
-    # ----------------------------
-    p_last = power_w.get("test_last_24h")
-    if p_last is None:
-        typer.echo("Missing power window: test_last_24h")
-        raise typer.Exit(code=2)
-
-    power_results = compute_energy_results(
-        p_last,
-        window_name="test_last_24h",
-        resample_seconds=resample_seconds,
+        prefix=prefix,
         compressor_on_threshold_w=compressor_on_threshold_w,
-    )
-
-    (results_dir / "power_results.json").write_text(
-        json.dumps(power_results.__dict__, indent=2),
-        encoding="utf-8",
-    )
-    pd.DataFrame([power_results.__dict__]).to_csv(
-        results_dir / "power_results.csv", index=False
-    )
-
-    # Plots: power + voltage + current
-    p_power_path = plot_power(p_last, results_dir, prefix="test_last_24h")
-    vc_paths = plot_voltage_current(p_last, results_dir, prefix="test_last_24h")
-
-    # ----------------------------
-    # Temperature plots + stats
-    # ----------------------------
-    t_stable = temp_w.get("stable_24h")
-    t_last = temp_w.get("test_last_24h")
-    t_test48 = temp_w.get("test_48h")
-
-    if t_stable is None or t_last is None or t_test48 is None:
-        typer.echo(
-            "Missing one or more temp windows: stable_24h, test_last_24h, test_48h"
-        )
-        raise typer.Exit(code=2)
-
-    food_cols = _detect_food_cols(t_stable, n=8)
-
-    if not food_cols:
-        typer.echo("Could not detect foodstuff columns '1'..'8' in aligned temp data.")
-    else:
-        plot_foodstuff_lines(
-            t_stable,
-            food_cols,
-            results_dir / "foodstuff_stable_24h.png",
-            title="Foodstuff temperatures (Stable 24h)",
-        )
-        plot_foodstuff_lines(
-            t_last,
-            food_cols,
-            results_dir / "foodstuff_test_last_24h.png",
-            title="Foodstuff temperatures (Test last 24h)",
-        )
-
-        plot_foodstuff_min_max_mean(
-            t_stable,
-            food_cols,
-            results_dir / "foodstuff_stable_24h_min_max_mean.png",
-            title="Foodstuff min / mean / max (Stable 24h)",
-        )
-        plot_foodstuff_min_max_mean(
-            t_last,
-            food_cols,
-            results_dir / "foodstuff_test_last_24h_min_max_mean.png",
-            title="Foodstuff min / mean / max (Test last 24h)",
-        )
-
-        stable_stats = compute_column_stats(t_stable, food_cols)
-        last_stats = compute_column_stats(t_last, food_cols)
-
-        stable_stats.to_csv(results_dir / "foodstuff_stats_stable_24h.csv", index=False)
-        last_stats.to_csv(
-            results_dir / "foodstuff_stats_test_last_24h.csv", index=False
-        )
-
-    # ----------------------------
-    # Ambient plot + gradient on test_48h
-    # ----------------------------
-    ta, g, c, rh = _detect_ambient_columns(
-        t_test48,
+        coverage_max_missing_percent=coverage_max_missing_percent,
         ta_col=ta_col,
         ground_col=ground_col,
         ceiling_col=ceiling_col,
         rh_col=rh_col,
+        probe_distance_m=probe_distance_m,
     )
 
-    if ta and g and c and rh:
-        plot_ambient_temps_and_rh(
-            t_test48,
-            results_dir / "ambient_test_48h_ta_ground_ceiling_rh.png",
-            ta_col=ta,
-            ground_col=g,
-            ceiling_col=c,
-            rh_col=rh,
-            title="Ambient Ta/Ground/Ceiling and RH (Test 48h)",
-        )
-    else:
-        typer.echo(
-            "Ambient plot not generated (could not detect required columns). "
-            "Use --ta-col, --ground-col, --ceiling-col, --rh-col to specify."
-        )
-        typer.echo(f"Detected: Ta={ta}, Ground={g}, Ceiling={c}, RH={rh}")
+    typer.echo(f"Output: {result.run_dir}")
+    typer.echo(f"QC: {result.qc_path}")
+    typer.echo(f"Summary: {result.summary_path}")
 
-    gradient_payload = None
-    if g and c:
-        try:
-            grad = compute_ambient_gradient(
-                t_test48,
-                window_name="test_48h",
-                ground_col=g,
-                ceiling_col=c,
-                distance_m=probe_distance_m,
-            )
-            gradient_payload = grad.__dict__
-            (results_dir / "ambient_gradient.json").write_text(
-                json.dumps(gradient_payload, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            typer.echo(f"Ambient gradient failed: {e}")
-
-    # ----------------------------
-    # Summary JSON (single place for GUI later)
-    # ----------------------------
-    summary = {
-        "test_start": str(qc.test_start),
-        "tz": tz,
-        "resample_seconds": resample_seconds,
-        "raw_dt_median_seconds": {"temp": temp_dt_med, "power": power_dt_med},
-        "power_results": power_results.__dict__,
-        "ambient_gradient": gradient_payload,
-        "coverage_missing_frac": {
-            "temp": qc.temp_missing_frac,
-            "power": qc.power_missing_frac,
-        },
-        "warnings": {"temp_parse": temp_rep.warnings, "qc": qc.warnings},
-        "plots": {
-            "power": str(p_power_path),
-            "voltage": str(vc_paths.get("voltage"))
-            if vc_paths.get("voltage")
-            else None,
-            "current": str(vc_paths.get("current"))
-            if vc_paths.get("current")
-            else None,
-        },
-    }
-    (results_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
-
-    # ----------------------------
-    # Console summary
-    # ----------------------------
-    typer.echo(f"Alignment complete. Output: {run_dir}")
-    typer.echo(f"QC: {qc_path}")
-    typer.echo(f"Test start: {qc.test_start}")
-
+    pr = result.summary["power_results"]
     typer.echo(
-        f"Power (test_last_24h): kWh/day={power_results.kwh_per_day:.3f}, "
-        f"Mean ON={power_results.mean_power_on_w:.1f} W, Mean OFF={power_results.mean_power_off_w:.1f} W, "
-        f"Runtime={power_results.runtime_percent:.1f}%"
+        f"Power (test_last_24h): kWh/day={pr['kwh_per_day']:.3f}, "
+        f"Mean ON={pr['mean_power_on_w']:.1f} W, Mean OFF={pr['mean_power_off_w']:.1f} W, "
+        f"Runtime={pr['runtime_percent']:.1f}%"
     )
     typer.echo(
-        f"Current (A): mean={power_results.mean_current_a:.3f}, "
-        f"ON={power_results.mean_current_on_a:.3f}, OFF={power_results.mean_current_off_a:.3f}"
+        f"Current (A): mean={pr['mean_current_a']:.3f}, "
+        f"ON={pr['mean_current_on_a']:.3f}, OFF={pr['mean_current_off_a']:.3f}"
     )
     typer.echo(
-        f"Power factor: mean={power_results.mean_power_factor:.3f}, "
-        f"ON={power_results.mean_power_factor_on:.3f}, OFF={power_results.mean_power_factor_off:.3f}"
+        f"Power factor: mean={pr['mean_power_factor']:.3f}, "
+        f"ON={pr['mean_power_factor_on']:.3f}, OFF={pr['mean_power_factor_off']:.3f}"
     )
 
-    if gradient_payload:
-        typer.echo(
-            f"Ambient gradient (test_48h): {gradient_payload['gradient_c_per_m']:.3f} °C/m "
-            f"(ceiling_mean={gradient_payload['ceiling_mean_c']:.2f}°C, "
-            f"ground_mean={gradient_payload['ground_mean_c']:.2f}°C, "
-            f"distance={gradient_payload['distance_m']:.2f}m)"
-        )
-
-    typer.echo(f"Power plot: {p_power_path}")
-    if vc_paths:
-        typer.echo("Voltage/Current plots:")
-        for k, p in vc_paths.items():
-            typer.echo(f"- {k}: {p}")
-
-    if temp_rep.warnings:
-        typer.echo("Temp parse warnings:")
-        for w in temp_rep.warnings:
+    if result.warnings:
+        typer.echo("Warnings:")
+        for w in result.warnings:
             typer.echo(f"- {w}")
 
-    if qc.warnings:
-        typer.echo("QC warnings:")
-        for w in qc.warnings:
-            if "Power" in w and "stable_24h" in w:
-                continue
-            typer.echo(f"- {w}")
-
-    if failed:
-        typer.echo(
-            "FAILED coverage gate (must be <= "
-            f"{coverage_max_missing_percent:.2f}% missing rows per required window):"
-        )
-        for f in failed:
+    if not result.passed_coverage_gate:
+        typer.echo("FAILED coverage gate:")
+        for f in result.failed_reasons:
             typer.echo(f"- {f}")
         raise typer.Exit(code=1)
