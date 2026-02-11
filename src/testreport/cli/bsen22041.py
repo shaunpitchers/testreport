@@ -15,6 +15,7 @@ from testreport.core.align_bsen22041 import (
     export_qc_report,
 )
 from testreport.core.energy import compute_energy_results
+from testreport.core.ambient_gradient import compute_ambient_gradient
 from testreport.core.plots import (
     plot_power,
     plot_voltage_current,
@@ -28,7 +29,6 @@ app = typer.Typer(help="BS EN 22041 tools")
 
 
 def _detect_food_cols(df: pd.DataFrame, *, n: int = 8) -> list[str]:
-    # Food probes are usually "1".."8"
     cols = []
     for i in range(1, n + 1):
         c = str(i)
@@ -55,13 +55,12 @@ def _detect_ambient_columns(
 ) -> tuple[str | None, str | None, str | None, str | None]:
     cols = set(df.columns)
 
-    # Prefer explicit overrides if provided and present
     ta = ta_col if (ta_col and ta_col in cols) else None
     g = ground_col if (ground_col and ground_col in cols) else None
     c = ceiling_col if (ceiling_col and ceiling_col in cols) else None
     rh = rh_col if (rh_col and rh_col in cols) else None
 
-    # Auto-detect Ta (room probe): prefer "ta" then "room temp 1" then first "room temp"
+    # Ta (room probe)
     if ta is None:
         ta = _find_first_matching(df, ["ta"])
     if ta is None and "ROOM TEMP 1" in cols:
@@ -71,7 +70,6 @@ def _detect_ambient_columns(
 
     # Ground/Ceiling
     if g is None:
-        # prefer exact "Ground"
         if "Ground" in cols:
             g = "Ground"
         else:
@@ -82,7 +80,7 @@ def _detect_ambient_columns(
         else:
             c = _find_first_matching(df, ["ceiling"])
 
-    # RH: prefer "ROOM HUMIDITY 1" then first RH/humidity column
+    # RH
     if rh is None and "ROOM HUMIDITY 1" in cols:
         rh = "ROOM HUMIDITY 1"
     if rh is None:
@@ -119,7 +117,11 @@ def align(
         None, "--ceiling-col", help="Ambient ceiling probe column override"
     ),
     rh_col: str | None = typer.Option(
-        None, "--rh-col", help="Ambient RH column override (usually first)"
+        None, "--rh-col", help="Ambient RH column override"
+    ),
+    # Gradient
+    probe_distance_m: float = typer.Option(
+        2.5, "--probe-distance-m", help="Distance between ground and ceiling probes (m)"
     ),
 ):
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -164,7 +166,7 @@ def align(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------------
-    # Coverage gate policy (BS EN 22041 as you described)
+    # Coverage gate policy
     # ----------------------------
     max_missing = float(coverage_max_missing_percent) / 100.0
 
@@ -247,7 +249,6 @@ def align(
     if not food_cols:
         typer.echo("Could not detect foodstuff columns '1'..'8' in aligned temp data.")
     else:
-        # Multi-line plots
         plot_foodstuff_lines(
             t_stable,
             food_cols,
@@ -261,7 +262,6 @@ def align(
             title="Foodstuff temperatures (Test last 24h)",
         )
 
-        # Min/Max/Mean envelope plots
         plot_foodstuff_min_max_mean(
             t_stable,
             food_cols,
@@ -275,7 +275,6 @@ def align(
             title="Foodstuff min / mean / max (Test last 24h)",
         )
 
-        # Stats tables for each probe
         stable_stats = compute_column_stats(t_stable, food_cols)
         last_stats = compute_column_stats(t_last, food_cols)
 
@@ -285,7 +284,7 @@ def align(
         )
 
     # ----------------------------
-    # Ambient plot: Ta + Ground + Ceiling (left axis), RH (right axis)
+    # Ambient plot + gradient on test_48h
     # ----------------------------
     ta, g, c, rh = _detect_ambient_columns(
         t_test48,
@@ -312,17 +311,81 @@ def align(
         )
         typer.echo(f"Detected: Ta={ta}, Ground={g}, Ceiling={c}, RH={rh}")
 
+    gradient_payload = None
+    if g and c:
+        try:
+            grad = compute_ambient_gradient(
+                t_test48,
+                window_name="test_48h",
+                ground_col=g,
+                ceiling_col=c,
+                distance_m=probe_distance_m,
+            )
+            gradient_payload = grad.__dict__
+            (results_dir / "ambient_gradient.json").write_text(
+                json.dumps(gradient_payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            typer.echo(f"Ambient gradient failed: {e}")
+
+    # ----------------------------
+    # Summary JSON (single place for GUI later)
+    # ----------------------------
+    summary = {
+        "test_start": str(qc.test_start),
+        "tz": tz,
+        "resample_seconds": resample_seconds,
+        "raw_dt_median_seconds": {"temp": temp_dt_med, "power": power_dt_med},
+        "power_results": power_results.__dict__,
+        "ambient_gradient": gradient_payload,
+        "coverage_missing_frac": {
+            "temp": qc.temp_missing_frac,
+            "power": qc.power_missing_frac,
+        },
+        "warnings": {"temp_parse": temp_rep.warnings, "qc": qc.warnings},
+        "plots": {
+            "power": str(p_power_path),
+            "voltage": str(vc_paths.get("voltage"))
+            if vc_paths.get("voltage")
+            else None,
+            "current": str(vc_paths.get("current"))
+            if vc_paths.get("current")
+            else None,
+        },
+    }
+    (results_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+
     # ----------------------------
     # Console summary
     # ----------------------------
     typer.echo(f"Alignment complete. Output: {run_dir}")
     typer.echo(f"QC: {qc_path}")
     typer.echo(f"Test start: {qc.test_start}")
+
     typer.echo(
         f"Power (test_last_24h): kWh/day={power_results.kwh_per_day:.3f}, "
         f"Mean ON={power_results.mean_power_on_w:.1f} W, Mean OFF={power_results.mean_power_off_w:.1f} W, "
         f"Runtime={power_results.runtime_percent:.1f}%"
     )
+    typer.echo(
+        f"Current (A): mean={power_results.mean_current_a:.3f}, "
+        f"ON={power_results.mean_current_on_a:.3f}, OFF={power_results.mean_current_off_a:.3f}"
+    )
+    typer.echo(
+        f"Power factor: mean={power_results.mean_power_factor:.3f}, "
+        f"ON={power_results.mean_power_factor_on:.3f}, OFF={power_results.mean_power_factor_off:.3f}"
+    )
+
+    if gradient_payload:
+        typer.echo(
+            f"Ambient gradient (test_48h): {gradient_payload['gradient_c_per_m']:.3f} °C/m "
+            f"(ceiling_mean={gradient_payload['ceiling_mean_c']:.2f}°C, "
+            f"ground_mean={gradient_payload['ground_mean_c']:.2f}°C, "
+            f"distance={gradient_payload['distance_m']:.2f}m)"
+        )
 
     typer.echo(f"Power plot: {p_power_path}")
     if vc_paths:
@@ -338,12 +401,10 @@ def align(
     if qc.warnings:
         typer.echo("QC warnings:")
         for w in qc.warnings:
-            # Ignore power stable_24h warnings (not required for your workflow)
             if "Power" in w and "stable_24h" in w:
                 continue
             typer.echo(f"- {w}")
 
-    # Fail after writing outputs (so user can inspect)
     if failed:
         typer.echo(
             "FAILED coverage gate (must be <= "

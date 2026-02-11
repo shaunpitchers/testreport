@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,15 @@ class EnergyResults:
     mean_power_on_w: float
     mean_power_off_w: float
 
+    # Electrical extras (optional if columns exist)
+    mean_current_a: float
+    mean_current_on_a: float
+    mean_current_off_a: float
+
+    mean_power_factor: float
+    mean_power_factor_on: float
+    mean_power_factor_off: float
+
 
 def _infer_dt_seconds_from_time(time: pd.Series) -> float:
     dt = pd.to_datetime(time, errors="coerce").diff().dropna()
@@ -37,11 +47,6 @@ def _compressor_state_hysteresis(
     on_threshold_w: float,
     off_threshold_w: float,
 ) -> pd.Series:
-    """
-    Boolean compressor state with hysteresis:
-      - turns ON when power >= on_threshold_w
-      - turns OFF when power <= off_threshold_w
-    """
     p = pd.to_numeric(power_w, errors="coerce").to_numpy()
     state = np.zeros(len(p), dtype=bool)
 
@@ -50,15 +55,45 @@ def _compressor_state_hysteresis(
         if np.isnan(val):
             state[i] = on
             continue
-
         if not on and val >= on_threshold_w:
             on = True
         elif on and val <= off_threshold_w:
             on = False
-
         state[i] = on
 
     return pd.Series(state, index=power_w.index, name="compressor_on")
+
+
+def _pick_pf_column(df: pd.DataFrame) -> str | None:
+    # Prefer a few common names; fall back to heuristic contains
+    candidates = [
+        "power_factor",
+        "PowerFactor",
+        "PF",
+        "pf",
+        "Power Factor",
+        "powerfactor",
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    for c in df.columns:
+        name = str(c).strip().lower()
+        if (
+            "power factor" in name
+            or name == "pf"
+            or name.endswith("_pf")
+            or "powerfactor" in name
+        ):
+            return c
+    return None
+
+
+def _safe_mean(series: pd.Series) -> float:
+    s = pd.to_numeric(series, errors="coerce")
+    if s.notna().any():
+        return float(s.mean(skipna=True))
+    return float("nan")
 
 
 def compute_energy_results(
@@ -69,10 +104,6 @@ def compute_energy_results(
     compressor_on_threshold_w: float = 50.0,
     compressor_off_threshold_w: float | None = None,
 ) -> EnergyResults:
-    """
-    Compute energy + compressor ON/OFF stats for one aligned window.
-    Expects columns: time, power_W
-    """
     if "time" not in power_aligned.columns or "power_W" not in power_aligned.columns:
         raise ValueError("power_aligned must contain columns: 'time', 'power_W'")
 
@@ -104,12 +135,13 @@ def compute_energy_results(
         off_threshold_w=compressor_off_threshold_w,
     )
 
+    # Only use rows where power is valid for runtime and ON/OFF power means
     valid_mask = df["power_W"].notna()
     power_valid = df.loc[valid_mask, "power_W"]
     comp_on_valid = comp_on.loc[valid_mask]
 
     if len(power_valid) == 0:
-        raise ValueError("No valid power samples in window; cannot compute energy.")
+        raise ValueError("No valid power samples in window; cannot compute results.")
 
     runtime_frac = float(comp_on_valid.mean())
     runtime_percent = runtime_frac * 100.0
@@ -125,10 +157,39 @@ def compute_energy_results(
         else float("nan")
     )
 
+    # Energy integration on valid power samples
     energy_kwh = float((power_valid * dt_s).sum() / 3_600_000.0)
-
     valid_hours = (len(power_valid) * dt_s) / 3600.0
     kwh_per_day = energy_kwh * (24.0 / valid_hours) if valid_hours > 0 else float("nan")
+
+    # -------- electrical extras --------
+    # Use same valid_mask by default; if current/pf have additional NaNs, means will ignore them.
+    current_col = "current_A" if "current_A" in df.columns else None
+    pf_col = _pick_pf_column(df)
+
+    if current_col:
+        cur = df.loc[valid_mask, current_col]
+        mean_current = _safe_mean(cur)
+        mean_current_on = (
+            _safe_mean(cur[comp_on_valid]) if comp_on_valid.any() else float("nan")
+        )
+        mean_current_off = (
+            _safe_mean(cur[~comp_on_valid]) if (~comp_on_valid).any() else float("nan")
+        )
+    else:
+        mean_current = mean_current_on = mean_current_off = float("nan")
+
+    if pf_col:
+        pf = df.loc[valid_mask, pf_col]
+        mean_pf = _safe_mean(pf)
+        mean_pf_on = (
+            _safe_mean(pf[comp_on_valid]) if comp_on_valid.any() else float("nan")
+        )
+        mean_pf_off = (
+            _safe_mean(pf[~comp_on_valid]) if (~comp_on_valid).any() else float("nan")
+        )
+    else:
+        mean_pf = mean_pf_on = mean_pf_off = float("nan")
 
     return EnergyResults(
         window_name=window_name,
@@ -142,4 +203,10 @@ def compute_energy_results(
         runtime_percent=runtime_percent,
         mean_power_on_w=mean_power_on,
         mean_power_off_w=mean_power_off,
+        mean_current_a=mean_current,
+        mean_current_on_a=mean_current_on,
+        mean_current_off_a=mean_current_off,
+        mean_power_factor=mean_pf,
+        mean_power_factor_on=mean_pf_on,
+        mean_power_factor_off=mean_pf_off,
     )
