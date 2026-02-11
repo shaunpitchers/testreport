@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, List
+from typing import Optional, Tuple
 
 import pandas as pd
 
@@ -15,211 +15,129 @@ class TempParseReport:
     warnings: list[str]
 
 
-def _pick_datetime_string_column(
-    df: pd.DataFrame, candidates: Sequence[str]
-) -> Optional[str]:
-    best_col = None
-    best_rate = 0.0
-    for c in candidates:
-        if c not in df.columns:
-            continue
-        parsed = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
-        rate = parsed.notna().mean()
-        if rate > best_rate:
-            best_rate = rate
-            best_col = c
-    return best_col if best_rate >= 0.90 else None
+def _excel_days_to_datetime(excel_days: pd.Series, *, as_utc: bool) -> pd.Series:
+    """
+    Excel serial date (days since 1899-12-30).
+    Returns tz-aware datetime if as_utc=True (UTC), else tz-naive.
+    """
+    s = pd.to_numeric(excel_days, errors="coerce")
+    # utc=as_utc makes it tz-aware UTC if True, else tz-naive
+    return pd.to_datetime(s, unit="D", origin="1899-12-30", utc=as_utc)
 
 
-def _pick_numeric_time_column(
-    df: pd.DataFrame, candidates: Sequence[str]
-) -> Optional[str]:
-    best_col = None
-    best_rate = 0.0
-    for c in candidates:
-        if c not in df.columns:
-            continue
-        s = pd.to_numeric(df[c], errors="coerce")
-        rate = s.notna().mean()
-        if rate > best_rate:
-            best_rate = rate
-            best_col = c
-    return best_col if best_rate >= 0.95 else None
+def _looks_like_excel_days(s: pd.Series) -> bool:
+    x = pd.to_numeric(s, errors="coerce")
+    if x.notna().mean() < 0.95:
+        return False
+    med = x.median()
+    # Excel days for modern dates are ~40000-50000
+    return 20000 < med < 90000
 
 
-def _convert_numeric_time(
-    s: pd.Series,
-    *,
-    time_base: str,
-    excel_origin: str = "1899-12-30",
-) -> pd.Series:
-    v = pd.to_numeric(s, errors="coerce")
-
-    if time_base == "excel_days":
-        return pd.to_datetime(v, unit="D", origin=excel_origin, errors="coerce")
-    if time_base == "unix_seconds":
-        return pd.to_datetime(v, unit="s", origin="unix", errors="coerce")
-    if time_base == "unix_millis":
-        return pd.to_datetime(v, unit="ms", origin="unix", errors="coerce")
-
-    raise ValueError(f"Unsupported time_base={time_base!r}")
+def _pick_time_column(df: pd.DataFrame) -> str:
+    for c in ["time", "Time", "timestamp", "Timestamp", "DateTime", "Datetime"]:
+        if c in df.columns:
+            return c
+    # fallback: first column
+    return str(df.columns[0])
 
 
-def _detect_numeric_columns(
-    df: pd.DataFrame,
-    exclude: Sequence[str],
-    *,
-    min_numeric_rate: float = 0.90,
-) -> Tuple[list[str], list[str]]:
-    numeric_cols: list[str] = []
-    dropped_cols: list[str] = []
-
+def _find_numeric_columns(df: pd.DataFrame, *, exclude: set[str]) -> list[str]:
+    cols: list[str] = []
     for c in df.columns:
         if c in exclude:
             continue
-
-        if df[c].isna().all():
-            dropped_cols.append(c)
-            continue
-
-        if str(c).lower().startswith("unnamed:"):
-            dropped_cols.append(c)
-            continue
-
-        series = pd.to_numeric(df[c], errors="coerce")
-        rate = series.notna().mean()
-
-        if rate >= min_numeric_rate:
-            numeric_cols.append(c)
-        else:
-            dropped_cols.append(c)
-
-    return numeric_cols, dropped_cols
+        s = pd.to_numeric(df[c], errors="coerce")
+        # keep if mostly numeric (or at least sometimes numeric)
+        if s.notna().sum() > 0:
+            cols.append(c)
+    return cols
 
 
 def parse_temp_rh_csv(
     path: str | Path,
     *,
-    # Timezone handling:
-    tz: str | None = None,
+    tz: str = "Europe/London",
     numeric_time_is_utc: bool = True,
-    time_offset_seconds: int = 0,
-    # CSV:
-    encoding: str | None = None,
-    min_numeric_rate: float = 0.90,
-    # Numeric time handling:
-    time_base: str = "excel_days",
-    excel_origin: str = "1899-12-30",
-    time_column: str | None = None,
-) -> tuple[pd.DataFrame, TempParseReport]:
+    time_base: str = "auto",  # "auto" | "excel_days" | "datetime"
+) -> Tuple[pd.DataFrame, TempParseReport]:
     """
-    Parse a temperature/RH CSV with either:
-      - datetime strings, or
-      - numeric timestamps (Excel days / Unix)
+    Parse temperature/RH CSV.
 
-    DST fix:
-      - If numeric_time_is_utc=True and tz is provided, timestamps are treated as UTC then converted
-        to the target tz (e.g. Europe/London), which correctly applies BST/GMT transitions.
-      - If numeric_time_is_utc=False, numeric timestamps are treated as local wall time and localized directly.
+    Supports:
+      - Excel-days numeric time (e.g. 45936.5417...)
+      - Datetime strings (ISO-ish)
 
     Returns:
-      df: ['time'] + numeric sensor columns
-      report: parse details/warnings
+      df with tz-aware 'time' column in tz,
+      report with parse details.
     """
     path = Path(path)
+    df = pd.read_csv(path)
 
-    sample = pd.read_csv(path, nrows=200, encoding=encoding)  # type: ignore[arg-type]
+    warnings: list[str] = []
+    dropped: list[str] = []
 
-    preferred = []
-    for c in sample.columns:
-        cl = str(c).strip().lower()
-        if cl in {"time", "timestamp", "datetime", "date_time", "date"}:
-            preferred.append(c)
-    candidates = preferred + [c for c in sample.columns if c not in preferred]
+    time_col = _pick_time_column(df)
+    raw_time = df[time_col]
 
-    if time_column is not None:
-        if time_column not in sample.columns:
-            raise ValueError(f"time_column={time_column!r} not found in CSV.")
-        candidates = [time_column]
+    # Decide time parsing mode
+    mode = time_base.lower().strip()
+    if mode not in {"auto", "excel_days", "datetime"}:
+        raise ValueError("time_base must be one of: auto, excel_days, datetime")
 
-    dt_col = _pick_datetime_string_column(sample, candidates)
-    numeric_time_col = None
-    time_source = ""
-
-    if dt_col is not None:
-        time_source = f"datetime_strings:{dt_col}"
+    use_excel = False
+    if mode == "excel_days":
+        use_excel = True
+    elif mode == "datetime":
+        use_excel = False
     else:
-        numeric_time_col = _pick_numeric_time_column(sample, candidates)
-        if numeric_time_col is None:
-            raise ValueError(
-                "Could not detect a time column as datetime strings or numeric time. "
-                "Specify time_column=... explicitly."
-            )
-        time_source = (
-            f"numeric_time:{numeric_time_col} ({time_base}, origin={excel_origin})"
-        )
+        use_excel = _looks_like_excel_days(raw_time)
 
-    df = pd.read_csv(path, encoding=encoding)  # type: ignore[arg-type]
-
-    # Build time series
-    if dt_col is not None:
-        time = pd.to_datetime(df[dt_col], errors="coerce", dayfirst=True)
-        exclude_time_cols = [dt_col]
-    else:
-        time = _convert_numeric_time(
-            df[numeric_time_col], time_base=time_base, excel_origin=excel_origin
-        )  # type: ignore[arg-type]
-        exclude_time_cols = [numeric_time_col]  # type: ignore[list-item]
-
-    if time.isna().mean() > 0.05:
-        raise ValueError(
-            f"Too many unparseable timestamps ({time.isna().mean() * 100:.1f}%). Detected: {time_source}"
-        )
-
-    # Apply timezone logic (DST-aware)
-    if tz:
-        if dt_col is None and numeric_time_is_utc:
-            # Numeric time treated as UTC/GMT -> convert to local tz (DST handled)
-            time = time.dt.tz_localize("UTC").dt.tz_convert(tz)
+    if use_excel:
+        dt = _excel_days_to_datetime(raw_time, as_utc=numeric_time_is_utc)
+        if numeric_time_is_utc:
+            # dt is UTC tz-aware -> convert to local tz
+            dt = dt.dt.tz_convert(tz)
+            time_source = f"excel_days:{time_col}:utc->tz({tz})"
         else:
-            # Treat as local wall-time in tz
-            time = time.dt.tz_localize(tz)
+            # numeric is local clock (rare)
+            dt = dt.dt.tz_localize(tz)
+            time_source = f"excel_days:{time_col}:localize({tz})"
+    else:
+        # datetime string parse
+        dt = pd.to_datetime(raw_time, errors="coerce")
+        if dt.dt.tz is None:
+            dt = dt.dt.tz_localize(tz)
+            time_source = f"datetime_strings:{time_col}:localize({tz})"
+        else:
+            dt = dt.dt.tz_convert(tz)
+            time_source = f"datetime_strings:{time_col}:convert({tz})"
 
-    if time_offset_seconds:
-        time = time + pd.to_timedelta(time_offset_seconds, unit="s")
+    df = df.copy()
+    df["time"] = dt
 
-    df_out = df.copy()
-    df_out.insert(0, "time", time)
-    for c in exclude_time_cols:
-        if c in df_out.columns:
-            df_out = df_out.drop(columns=[c])
+    # Drop rows without time
+    before = len(df)
+    df = df.dropna(subset=["time"]).copy()
+    after = len(df)
+    if after < before:
+        warnings.append(f"Dropped {before - after} rows with invalid time parsing.")
 
-    df_out = (
-        df_out.sort_values("time")
+    # Numeric column detection (but don’t coerce everything yet; keep original columns)
+    numeric_cols = _find_numeric_columns(df, exclude={"time", time_col})
+
+    # Ensure sort + unique time
+    df = (
+        df.sort_values("time")
         .drop_duplicates(subset=["time"], keep="first")
         .reset_index(drop=True)
     )
 
-    numeric_cols, dropped_cols = _detect_numeric_columns(
-        df_out, exclude=["time"], min_numeric_rate=min_numeric_rate
-    )
-    for c in numeric_cols:
-        df_out[c] = pd.to_numeric(df_out[c], errors="coerce")
-
-    warnings: List[str] = []
-    # Optional: sanity warning if time steps vary wildly
-    dt = df_out["time"].diff().dropna()
-    if len(dt):
-        med = dt.median()
-        if (dt.gt(med * 3).mean() > 0.01) or (dt.lt(med / 3).mean() > 0.01):
-            warnings.append(
-                "Timestamp spacing looks jittery/irregular; resampling will be important."
-            )
-
-    report = TempParseReport(
+    rep = TempParseReport(
         time_source=time_source,
-        numeric_columns=list(numeric_cols),
-        dropped_columns=list(dropped_cols),
+        numeric_columns=numeric_cols,
+        dropped_columns=dropped,
         warnings=warnings,
     )
-    return df_out[["time"] + list(numeric_cols)], report
+    return df, rep

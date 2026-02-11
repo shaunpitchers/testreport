@@ -167,7 +167,7 @@ def align_bsen22041_by_test_start(
     power_range = (power_df["time"].iloc[0], power_df["time"].iloc[-1])
 
     windows = _build_windows(t0, stable_hours=stable_hours, test_hours=test_hours)
-    freq = f"{int(resample_seconds)}S"
+    freq = f"{int(resample_seconds)}s"
 
     temp_out: dict[str, pd.DataFrame] = {}
     power_out: dict[str, pd.DataFrame] = {}
