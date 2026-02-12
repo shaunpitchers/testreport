@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="ADE Insight"
+    Language="1033"
+    Version="0.1.0"
+    Manufacturer="ADE"
+    UpgradeCode="PUT-A-GUID-HERE-ONCE-AND-KEEP-IT-FOREVER">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of ADE Insight is already installed." />
+    <MediaTemplate />
+
+    <!-- Program Files -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="ADE Insight"/>
+      </Directory>
+
+      <!-- Start Menu shortcut -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuDir" Name="ADE Insight"/>
+      </Directory>
+    </Directory>
+
+    <!-- Files harvested into this component group by heat -->
+    <Feature Id="MainFeature" Title="ADE Insight" Level="1">
+      <ComponentGroupRef Id="ADEInsightFiles"/>
+      <ComponentRef Id="StartMenuShortcuts"/>
+    </Feature>
+
+    <Component Id="StartMenuShortcuts" Guid="*"
+               Directory="ProgramMenuDir">
+      <Shortcut Id="StartMenuShortcut"
+                Name="ADE Insight"
+                Description="ADE Insight"
+                Target="[INSTALLFOLDER]ADE Insight.exe"
+                WorkingDirectory="INSTALLFOLDER" />
+
+      <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuDir" On="uninstall"/>
+      <RegistryValue Root="HKLM" Key="Software\\ADE\\ADEInsight" Name="Installed" Type="integer" Value="1" KeyPath="yes"/>
+    </Component>
+
+  </Product>
+</Wix>

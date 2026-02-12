@@ -5,3 +5,5 @@ Requires-Python: >=3.10
 Requires-Dist: pandas>=2.0
 Requires-Dist: typer>=0.9
 Requires-Dist: tzdata
+Requires-Dist: pyside6
+Requires-Dist: pyqtgraph

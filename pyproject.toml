@@ -1,19 +1,44 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "testreport"
+name = "ade-insight"
 version = "0.1.0"
+description = "ADE Insight - test results analyser for report-ready outputs (BS EN 22041)"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["pandas>=2.0", "typer>=0.9","tzdata"]
+license = { text = "Proprietary" }
+authors = [
+  { name = "Shaun Mark Charles Pitchers" }
+]
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "typer>=0.9",
+  "rich>=13.0",
+]
+
+[project.optional-dependencies]
+gui = [
+  "PySide6>=6.5",
+]
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+]
 
 [project.scripts]
-testreport = "testreport.cli.app:main"
-testreport-gui = "testreport.gui.app:main"
+adeinsight = "testreport.cli.app:main"
+adeinsight-gui = "testreport.gui.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
