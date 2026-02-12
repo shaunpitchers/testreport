@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Bundle Name="ADE Insight"
+          Version="0.1.0"
+          Manufacturer="ADE"
+          UpgradeCode="PUT-YOUR-BUNDLE-UPGRADECODE-GUID-HERE"
+          IconSourceFile="..\..\src\testreport\gui\assets\adeinsight.ico">
+
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+      <bal:WixStandardBootstrapperApplication
+        LicenseFile="installer\wix3\LICENSE.rtf"
+        Theme="hyperlinkLicense" />
+    </BootstrapperApplicationRef>
+
+    <!-- Detect VC++ 2015-2022 x64 runtime (common detect key).
+         If you prefer, we can tighten this based on exact runtime version requirements. -->
+    <util:RegistrySearch
+        Id="VCRedistInstalled"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+        Value="Installed"
+        Variable="VCRedistInstalled"
+        Result="value" />
+
+    <Chain>
+      <!-- VC++ Redistributable -->
+      <ExePackage
+          Id="VCRedistX64"
+          DisplayName="Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+          SourceFile="installer\wix3\vc_redist.x64.exe"
+          Cache="yes"
+          Compressed="yes"
+          PerMachine="yes"
+          Vital="yes"
+          InstallCommand="/install /quiet /norestart"
+          RepairCommand="/repair /quiet /norestart"
+          UninstallCommand="/uninstall /quiet /norestart"
+          DetectCondition="VCRedistInstalled = 1" />
+
+      <!-- Your MSI -->
+      <MsiPackage
+          Id="ADEInsightMSI"
+          SourceFile="dist-installer\ADE_Insight.msi"
+          DisplayName="ADE Insight"
+          Visible="no"
+          Vital="yes"
+          Compressed="yes" />
+    </Chain>
+
+  </Bundle>
+</Wix>
+
