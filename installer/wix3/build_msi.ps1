@@ -1,39 +1,34 @@
 $ErrorActionPreference = "Stop"
 
-# Paths
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$DistDir = Join-Path $Root "dist\ADE Insight"
-$OutDir  = Join-Path $Root "dist-installer"
-$WixDir  = $PSScriptRoot
+Set-Location $Root
 
-if (!(Test-Path $DistDir)) {
-  throw "Missing PyInstaller output: $DistDir  (run scripts/build_exe.ps1 first)"
-}
-
+$Wix = Join-Path $Root "installer\wix3"
+$OutDir = Join-Path $Root "dist-installer"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# 1) Harvest the app folder into a component group
-# -cg: component group name
-# -dr: directory ref id in Product.wxs (INSTALLFOLDER)
-# -gg: generate GUIDs
-# -sreg/-srd/-sfrag reduce noise
-# -var: makes source path variable so build works anywhere
-$HarvestWxs = Join-Path $WixDir "harvest.wxs"
-heat dir "$DistDir" `
+Write-Host "[1/4] Build app folder via PyInstaller..."
+& "$Root\scripts\build_exe.ps1"
+
+$DistApp = Join-Path $Root "dist\ADE Insight"
+if (!(Test-Path $DistApp)) { throw "Missing PyInstaller output folder: $DistApp" }
+
+Write-Host "[2/4] Harvest dist folder into WiX components..."
+$HarvestWxs = Join-Path $Wix "harvest.wxs"
+heat dir "$DistApp" `
   -cg ADEInsightFiles `
   -dr INSTALLFOLDER `
   -gg -sreg -srd -sfrag `
   -var var.SourceDir `
   -out "$HarvestWxs"
 
-# 2) Compile
+Write-Host "[3/4] Build MSI..."
 candle -nologo `
-  -dSourceDir="$DistDir" `
+  -dSourceDir="$DistApp" `
   -out "$OutDir\\" `
-  "$WixDir\Product.wxs" `
+  "$Wix\Product.wxs" `
   "$HarvestWxs"
 
-# 3) Link -> MSI
 $MsiPath = Join-Path $OutDir "ADE_Insight.msi"
 light -nologo -ext WixUIExtension `
   -out "$MsiPath" `
@@ -41,4 +36,32 @@ light -nologo -ext WixUIExtension `
   "$OutDir\harvest.wixobj"
 
 Write-Host "MSI created: $MsiPath"
+
+Write-Host "[4/4] Ensure vc_redist.x64.exe present..."
+$VcRedist = Join-Path $Wix "vc_redist.x64.exe"
+if (!(Test-Path $VcRedist)) {
+  # Official aka.ms link often redirects; this works in PowerShell with -L behavior
+  $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+  Write-Host "Downloading VC++ redist from: $url"
+  Invoke-WebRequest -Uri $url -OutFile $VcRedist
+}
+
+Write-Host "[5/5] Build Bootstrapper EXE..."
+candle -nologo `
+  -out "$OutDir\\" `
+  -ext WixBalExtension `
+  -ext WixUtilExtension `
+  "$Wix\Bundle.wxs"
+
+$SetupExe = Join-Path $OutDir "ADEInsightSetup.exe"
+light -nologo `
+  -out "$SetupExe" `
+  -ext WixBalExtension `
+  -ext WixUtilExtension `
+  "$OutDir\Bundle.wixobj"
+
+Write-Host ""
+Write-Host "DONE."
+Write-Host "MSI:  $MsiPath"
+Write-Host "EXE:  $SetupExe"
 
