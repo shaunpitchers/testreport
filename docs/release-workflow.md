@@ -278,3 +278,175 @@ ADE-Insight_v1.0.0_windows_x64.zip.sha256
 * Always update the **CHANGELOG**
 
 This keeps releases reproducible and traceable.
+
+# Git Safety Practices
+
+These safeguards help prevent accidental releases, broken builds, or pushing unfinished code.
+
+---
+
+# Pre-Push Protection for `main`
+
+Direct pushes to `main` should be avoided. All work should normally go through feature branches.
+
+A Git **pre-push hook** can prevent accidental pushes.
+
+Create the hook:
+
+```bash
+nvim .git/hooks/pre-push
+```
+
+Add the following script:
+
+```bash
+#!/bin/sh
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+
+if [ "$branch" = "main" ]; then
+  echo ""
+  echo "⚠️  Direct push to 'main' detected."
+  echo "Use a feature branch and merge instead."
+  echo ""
+  echo "If this push is intentional, run:"
+  echo "    git push origin main --no-verify"
+  echo ""
+  exit 1
+fi
+```
+
+Make it executable:
+
+```bash
+chmod +x .git/hooks/pre-push
+```
+
+This prevents accidental pushes to `main`.
+
+If a direct push is truly required:
+
+```bash
+git push origin main --no-verify
+```
+
+---
+
+# Optional Pre-Commit Checks
+
+Additional checks can be added before committing.
+
+Create:
+
+```bash
+nvim .git/hooks/pre-commit
+```
+
+Example basic check:
+
+```bash
+#!/bin/sh
+
+echo "Running basic repository checks..."
+```
+
+This hook can later be expanded to run:
+
+* linting (`ruff`)
+* formatting checks
+* test runs
+* version validation
+
+---
+
+# Release Safety Checklist
+
+Before creating any release:
+
+```bash
+git status
+git log --oneline -5
+```
+
+Verify:
+
+* Working tree is clean
+* Recent commits look correct
+* Version has been updated
+* Changelog has been updated
+
+---
+
+# Always Build Releases From Tags
+
+Releases should always be built from a **Git tag**.
+
+Example:
+
+```bash
+git checkout v1.0.0
+```
+
+Never build a release directly from `main`.
+
+Building from a tag guarantees:
+
+* reproducible builds
+* traceable release history
+* exact match between source and binary
+
+---
+
+# Typical Release Workflow
+
+1. Ensure repository is clean
+
+```bash
+git status
+```
+
+2. Update version in `pyproject.toml`
+
+3. Update `CHANGELOG.md`
+
+4. Commit release changes
+
+```bash
+git add pyproject.toml CHANGELOG.md
+git commit -m "Release vX.Y.Z"
+git push
+```
+
+5. Create tag
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+6. Build release from the tag
+
+```bash
+git checkout vX.Y.Z
+```
+
+7. Build binaries
+
+* PyInstaller executable
+* WiX MSI installer
+
+8. Generate SHA256 checksums
+
+9. Publish artifacts internally
+
+---
+
+# Why This Matters
+
+These practices ensure:
+
+* releases are reproducible
+* binaries match the source code exactly
+* mistakes can be traced and fixed easily
+
+This workflow greatly reduces the risk of broken or inconsistent releases.
