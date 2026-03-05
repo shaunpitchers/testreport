@@ -50,6 +50,11 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 import matplotlib.image as mpimg
 
 
+def resource_path(*parts: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
 def _set_item(table: QTableWidget, r: int, c: int, text: str) -> QTableWidgetItem:
     item = QTableWidgetItem(text)
     item.setFlags(item.flags() ^ Qt.ItemIsEditable)
@@ -551,12 +556,12 @@ class MainWindow(QMainWindow):
     # Styling / logo
     # ---------------------------
     def _apply_stylesheet(self) -> None:
-        qss_path = Path(__file__).parent / "style.qss"
+        qss_path = resource_path("ade_insight", "gui", "style.qss")
         if qss_path.exists():
             self.setStyleSheet(qss_path.read_text(encoding="utf-8"))
 
     def _try_load_logo(self) -> None:
-        candidate = Path(__file__).parent / "assets" / "adande_logo.png"
+        candidate = resource_path("ade_insight", "gui", "assets", "adande_logo.png")
         if candidate.exists():
             pix = QPixmap(str(candidate))
             if not pix.isNull():
