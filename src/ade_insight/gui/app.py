@@ -50,8 +50,22 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 import matplotlib.image as mpimg
 
 
-def resource_path(*parts: str) -> Path:
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+def gui_resource_path(*parts: str) -> Path:
+    """
+    Returns a path to GUI resources in both:
+    - normal Python runs (dev / pip install)
+    - PyInstaller frozen builds
+
+    In dev installs, this file lives in: .../ade_insight/gui/app.py
+    so resources are relative to Path(__file__).parent.
+
+    In PyInstaller builds, resources are bundled under:
+    sys._MEIPASS/ade_insight/gui/...
+    """
+    if getattr(sys, "_MEIPASS", None):
+        base = Path(sys._MEIPASS) / "ade_insight" / "gui"  # type: ignore[attr-defined]
+    else:
+        base = Path(__file__).resolve().parent
     return base.joinpath(*parts)
 
 
@@ -556,12 +570,12 @@ class MainWindow(QMainWindow):
     # Styling / logo
     # ---------------------------
     def _apply_stylesheet(self) -> None:
-        qss_path = resource_path("ade_insight", "gui", "style.qss")
+        qss_path = gui_resource_path("style.qss")
         if qss_path.exists():
             self.setStyleSheet(qss_path.read_text(encoding="utf-8"))
 
     def _try_load_logo(self) -> None:
-        candidate = resource_path("ade_insight", "gui", "assets", "adande_logo.png")
+        candidate = gui_resource_path("assets", "adande_logo.png")
         if candidate.exists():
             pix = QPixmap(str(candidate))
             if not pix.isNull():
