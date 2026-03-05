@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
+import re
 import inspect
 import json
 import sys
+import pandas as pd
 from pathlib import Path
 from typing import Any, Callable
 
@@ -86,9 +89,7 @@ class MatplotlibImageDialog(QDialog):
 
 
 class PlotThumb(QWidget):
-    def __init__(
-        self, title: str, image_path: Path, on_open: Callable[[str, Path], None]
-    ) -> None:
+    def __init__(self, title: str, image_path: Path, on_open: Callable[[str, Path], None]) -> None:
         super().__init__()
         self._title = title
         self._path = image_path
@@ -242,6 +243,14 @@ class MainWindow(QMainWindow):
         self.out_dir = QLineEdit("out/gui")
         self.tz = QLineEdit("Europe/London")
         self.test_start = QLineEdit("2025-10-07 14:00:00")
+        self._test_start_user_set = False
+
+        # If user types in test start, don’t overwrite it again
+        self.test_start.textEdited.connect(lambda _t: setattr(self, "_test_start_user_set", True))
+
+        # Auto-update when file paths change (but only if user hasn't edited it)
+        self.temp_path.textChanged.connect(self._maybe_autofill_test_start)
+        self.power_path.textChanged.connect(self._maybe_autofill_test_start)
 
         # Product selection (kept minimal to avoid crowding)
         self.product_combo = QComboBox()
@@ -282,7 +291,7 @@ class MainWindow(QMainWindow):
         self.combo_ceiling = QComboBox()
         self.combo_rh = QComboBox()
 
-        # Temp stats selector (requires summary.json contains temp_summary)
+        # Temp stats selector
         self.temp_stats_window = QComboBox()
         self.temp_stats_window.addItem("Stable 24h", "stable_24h")
         self.temp_stats_window.addItem("Test last 24h", "test_last_24h")
@@ -317,9 +326,7 @@ class MainWindow(QMainWindow):
 
         self.brand_title = QLabel("ADE Insight")
         self.brand_title.setObjectName("brandTitle")
-        self.brand_subtitle = QLabel(
-            "Test results analyser for report-ready outputs (BS EN 22041)"
-        )
+        self.brand_subtitle = QLabel("Test results analyser for report-ready outputs (BS EN 22041)")
         self.brand_subtitle.setObjectName("brandSubtitle")
 
         brand_text = QVBoxLayout()
@@ -373,6 +380,17 @@ class MainWindow(QMainWindow):
         self.log = QTextEdit()
         self.log.setReadOnly(True)
 
+        # -----------------------
+        # Energy label tab (fixed order)
+        # -----------------------
+        energy_page = QWidget()
+        energy_layout = QVBoxLayout(energy_page)
+
+        self.energy_header = QLabel("")
+        self.energy_header.setWordWrap(True)
+        self.energy_header.setStyleSheet("color:#333; font-weight:600;")
+        energy_layout.addWidget(self.energy_header)
+
         # Energy label table
         self.energy_table = QTableWidget(1, 7)
         self.energy_table.setHorizontalHeaderLabels(
@@ -381,9 +399,6 @@ class MainWindow(QMainWindow):
         self.energy_table.horizontalHeader().setStretchLastSection(True)
         self.energy_table.setAlternatingRowColors(True)
         self.energy_table.verticalHeader().setVisible(False)
-
-        energy_page = QWidget()
-        energy_layout = QVBoxLayout(energy_page)
         energy_layout.addWidget(self.energy_table)
 
         # Plot tabs
@@ -464,6 +479,75 @@ class MainWindow(QMainWindow):
         main.addWidget(self.tabs, 2)
 
     # ---------------------------
+    # Auto test-start helper methods (RESTORED as real methods)
+    # ---------------------------
+    def _snap_to_minute(self, t: dt.datetime) -> dt.datetime:
+        return t.replace(second=0, microsecond=0)
+
+    def _first_timestamp_in_temp_csv(self, path: str) -> dt.datetime | None:
+        """
+        Read the first timestamp robustly.
+        Your temp CSV time is often Excel-days numeric, so reuse the project parser.
+        """
+        try:
+            temp_df, _rep = parse_temp_rh_csv(
+                Path(path),
+                tz=self.tz.text().strip() or "Europe/London",
+                numeric_time_is_utc=True,
+                time_base="excel_days",
+            )
+        except Exception:
+            return None
+
+        if "time" not in temp_df.columns:
+            return None
+
+        s = pd.to_datetime(temp_df["time"], errors="coerce").dropna()
+        if s.empty:
+            return None
+
+        return s.iloc[0].to_pydatetime()
+
+    def _last_timestamp_in_power_file(self, path: str) -> dt.datetime | None:
+        pat = re.compile(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})")
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()[-200:]
+        except Exception:
+            return None
+
+        for line in reversed(lines):
+            m = pat.search(line)
+            if m:
+                try:
+                    return dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+        return None
+
+    def _maybe_autofill_test_start(self) -> None:
+        if getattr(self, "_test_start_user_set", False):
+            return
+
+        temp_path = self.temp_path.text().strip()
+        if not temp_path:
+            return
+
+        first = self._first_timestamp_in_temp_csv(temp_path)
+        if first is None:
+            return
+
+        guess = self._snap_to_minute(first + dt.timedelta(hours=24))
+
+        power_path = self.power_path.text().strip()
+        if power_path:
+            last_power = self._last_timestamp_in_power_file(power_path)
+            if last_power and (guess + dt.timedelta(hours=48) > last_power):
+                guess = self._snap_to_minute(last_power - dt.timedelta(hours=48))
+
+        self.test_start.setText(guess.strftime("%Y-%m-%d %H:%M:%S"))
+
+    # ---------------------------
     # Styling / logo
     # ---------------------------
     def _apply_stylesheet(self) -> None:
@@ -499,13 +583,15 @@ class MainWindow(QMainWindow):
         )
         if fn:
             self.temp_path.setText(fn)
+            self._maybe_autofill_test_start()
 
     def pick_power(self) -> None:
         fn, _ = QFileDialog.getOpenFileName(
             self, "Select power TXT", "", "Text files (*.txt);;All files (*)"
         )
         if fn:
-            self.power_path.setText(fn)
+            self.power_path.setText(fn)  # FIXED (was incorrectly setting temp_path)
+            self._maybe_autofill_test_start()
 
     def pick_out_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -514,9 +600,7 @@ class MainWindow(QMainWindow):
 
     def open_output_folder(self) -> None:
         if not self._last_run_dir:
-            QMessageBox.information(
-                self, "No output", "Run ADE Insight first to generate output."
-            )
+            QMessageBox.information(self, "No output", "Run ADE Insight first to generate output.")
             return
         import os
         import subprocess
@@ -529,9 +613,7 @@ class MainWindow(QMainWindow):
         else:
             subprocess.run(["xdg-open", p], check=False)
 
-    def _combo_set(
-        self, combo: QComboBox, items: list[str], preferred: str | None
-    ) -> None:
+    def _combo_set(self, combo: QComboBox, items: list[str], preferred: str | None) -> None:
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("(auto)", "")
@@ -547,9 +629,7 @@ class MainWindow(QMainWindow):
         temp = self.temp_path.text().strip()
         tz = self.tz.text().strip() or "Europe/London"
         if not temp or not Path(temp).exists():
-            QMessageBox.critical(
-                self, "Missing input", "Select a valid Temp/RH CSV first."
-            )
+            QMessageBox.critical(self, "Missing input", "Select a valid Temp/RH CSV first.")
             return
 
         self.log_line("Loading columns from temp CSV (quick parse)…")
@@ -686,6 +766,26 @@ class MainWindow(QMainWindow):
         lines.append(f"Resample: {summary.get('resample_seconds', '')} s")
         lines.append("")
 
+        designation = summary.get("test_designation") or ""
+        climate = summary.get("climate_class") or ""
+        food_class = summary.get("food_class") or ""
+
+        if designation or climate or food_class:
+            lines.append("Test classification")
+            if designation:
+                lines.append(f"- Designation: {designation}")
+            if climate:
+                lines.append(f"- Climate class: {climate}")
+            if food_class:
+                lines.append(f"- Food class: {food_class}")
+            amb = summary.get("ambient_means") or {}
+            if isinstance(amb, dict):
+                t = amb.get("temp_c")
+                rh = amb.get("rh_percent")
+                if t is not None or rh is not None:
+                    lines.append(f"- Ambient means: {t:.2f} °C, {rh:.2f} %RH")
+            lines.append("")
+
         pr = summary.get("power_results", {}) or {}
         if pr:
             lines.append("Electrical (test_last_24h)")
@@ -722,9 +822,7 @@ class MainWindow(QMainWindow):
 
         return "\n".join(lines)
 
-    def _populate_qc_table(
-        self, summary: dict[str, Any] | None, qc: dict[str, Any] | None
-    ) -> None:
+    def _populate_qc_table(self, summary: dict[str, Any] | None, qc: dict[str, Any] | None) -> None:
         self.qc_table.setRowCount(0)
 
         temp_missing: dict[str, float] = {}
@@ -750,10 +848,7 @@ class MainWindow(QMainWindow):
         warn_power = {"test_48h", "test_first_24h"}
 
         windows = sorted(
-            set(temp_missing.keys())
-            | set(power_missing.keys())
-            | required_temp
-            | required_power
+            set(temp_missing.keys()) | set(power_missing.keys()) | required_temp | required_power
         )
 
         for w in windows:
@@ -761,7 +856,9 @@ class MainWindow(QMainWindow):
             t = temp_missing.get(w, None)
             if w in required_temp:
                 if t is None:
-                    self._qc_add_row(w, "Temp", None, gate_percent, "FAIL", "Missing window or no data")
+                    self._qc_add_row(
+                        w, "Temp", None, gate_percent, "FAIL", "Missing window or no data"
+                    )
                 elif t <= gate_frac:
                     self._qc_add_row(w, "Temp", t, gate_percent, "PASS", "")
                 else:
@@ -774,14 +871,18 @@ class MainWindow(QMainWindow):
             p = power_missing.get(w, None)
             if w in required_power:
                 if p is None:
-                    self._qc_add_row(w, "Power", None, gate_percent, "FAIL", "Missing window or no data")
+                    self._qc_add_row(
+                        w, "Power", None, gate_percent, "FAIL", "Missing window or no data"
+                    )
                 elif p <= gate_frac:
                     self._qc_add_row(w, "Power", p, gate_percent, "PASS", "")
                 else:
                     self._qc_add_row(w, "Power", p, gate_percent, "FAIL", "Over coverage gate")
             elif w in warn_power:
                 if p is None:
-                    self._qc_add_row(w, "Power", None, gate_percent, "WARN", "No data for this window")
+                    self._qc_add_row(
+                        w, "Power", None, gate_percent, "WARN", "No data for this window"
+                    )
                 elif p <= gate_frac:
                     self._qc_add_row(w, "Power", p, gate_percent, "PASS", "")
                 else:
@@ -846,6 +947,19 @@ class MainWindow(QMainWindow):
             return ""
 
     def _refresh_energy_label_table(self) -> None:
+        designation = (self._last_summary or {}).get("test_designation") or ""
+        prod = (self._last_summary or {}).get("product") or {}
+        pname = prod.get("name") if isinstance(prod, dict) else ""
+        cab = prod.get("cabinet_class") if isinstance(prod, dict) else ""
+
+        header_bits = []
+        if designation:
+            header_bits.append(f"Designation: {designation}")
+        if pname:
+            header_bits.append(f"Product: {pname}")
+        if cab:
+            header_bits.append(f"Cabinet class: {cab}")
+        self.energy_header.setText(" | ".join(header_bits))
         # Clear row
         for c in range(self.energy_table.columnCount()):
             _set_item(self.energy_table, 0, c, "")
@@ -889,7 +1003,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Missing test start", "Please enter test start time.")
             return
         if not tz:
-            QMessageBox.critical(self, "Missing timezone", "Please enter a timezone (e.g. Europe/London).")
+            QMessageBox.critical(
+                self, "Missing timezone", "Please enter a timezone (e.g. Europe/London)."
+            )
             return
 
         # Reset UI
@@ -953,7 +1069,11 @@ class MainWindow(QMainWindow):
 
             # Plots: prefer result.plots, fallback summary["plots"]
             plots = getattr(result, "plots", None)
-            if not plots and self._last_summary and isinstance(self._last_summary.get("plots"), dict):
+            if (
+                not plots
+                and self._last_summary
+                and isinstance(self._last_summary.get("plots"), dict)
+            ):
                 plots = self._last_summary["plots"]
             if isinstance(plots, dict):
                 self._update_plot_tabs(plots)
@@ -963,7 +1083,9 @@ class MainWindow(QMainWindow):
                 self.summary_text.setPlainText(self._format_summary_text(self._last_summary))
                 self._refresh_energy_label_table()
             else:
-                self.summary_text.setPlainText(f"Run completed. Output: {run_dir}\n(No summary.json found)")
+                self.summary_text.setPlainText(
+                    f"Run completed. Output: {run_dir}\n(No summary.json found)"
+                )
 
             # QC
             self._populate_qc_table(

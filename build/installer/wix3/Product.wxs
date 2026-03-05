@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <Product
+    Id="*"
+    Name="ADE Insight"
+    Language="1033"
+    Version="0.1.0"
+    Manufacturer="ADE"
+    UpgradeCode="PUT-YOUR-UPGRADECODE-GUID-HERE">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of ADE Insight is already installed." />
+    <MediaTemplate />
+
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico"/>
+    <Icon Id="AppIcon.ico" SourceFile="..\..\src\testreport\gui\assets\adeinsight.ico" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="ADE Insight"/>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuDir" Name="ADE Insight"/>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="ADE Insight" Level="1">
+      <ComponentGroupRef Id="ADEInsightFiles"/>
+      <ComponentRef Id="StartMenuShortcuts"/>
+    </Feature>
+
+    <Component Id="StartMenuShortcuts" Guid="*"
+               Directory="ProgramMenuDir">
+      <Shortcut Id="StartMenuShortcut"
+                Name="ADE Insight"
+                Description="ADE Insight"
+                Target="[INSTALLFOLDER]ADE Insight.exe"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuDir" On="uninstall"/>
+      <RegistryValue Root="HKLM" Key="Software\ADE\ADEInsight" Name="Installed" Type="integer" Value="1" KeyPath="yes"/>
+    </Component>
+
+  </Product>
+</Wix>
+

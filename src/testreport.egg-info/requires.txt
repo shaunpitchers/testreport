@@ -1,5 +1,0 @@
-pandas>=2.0
-typer>=0.9
-tzdata
-pyside6
-pyqtgraph

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import datetime as dt
 import json
-from typing import Any
 import csv
+from typing import Any
 
 import pandas as pd
 
@@ -26,11 +26,15 @@ from testreport.core.plots import (
     plot_ambient_temps_and_rh,
 )
 from testreport.core.temp_stats import compute_column_stats
+
 from testreport.core.products import (
     PRODUCTS,
     classify_cabinet_by_food_mean,
     saec_constants,
     compute_energy_label,
+    check_food_temps_against_target,
+    classify_food_class,
+    classify_climate_class,
 )
 
 
@@ -48,7 +52,7 @@ class Bsen22041RunResult:
 
 
 def _detect_food_cols(df: pd.DataFrame, *, n: int = 8) -> list[str]:
-    cols = []
+    cols: list[str] = []
     for i in range(1, n + 1):
         c = str(i)
         if c in df.columns:
@@ -115,7 +119,7 @@ def _temp_summary(df: pd.DataFrame, cols: list[str]) -> dict[str, Any]:
     overall_max = float(data.max(axis=None, skipna=True))
     overall_mean = float(data.stack().mean(skipna=True))
 
-    per = {}
+    per: dict[str, dict[str, float]] = {}
     for c in cols:
         s = data[c]
         per[str(c)] = {
@@ -130,6 +134,42 @@ def _temp_summary(df: pd.DataFrame, cols: list[str]) -> dict[str, Any]:
     }
 
 
+def _fmt3(v: Any) -> str:
+    try:
+        if v is None:
+            return ""
+        x = float(v)
+        if x != x:  # NaN
+            return ""
+        return f"{x:.3f}"
+    except Exception:
+        return ""
+
+
+def _write_energy_label_csv(results_dir: Path, payload: dict[str, Any] | None) -> None:
+    """
+    Always write a single-row CSV with the requested columns.
+    If payload is missing/incomplete, values are left blank.
+    """
+    csv_path = results_dir / "energy_label.csv"
+    cols = ["AEC_kWh_per_year", "Volume_L", "M", "N", "SAEC", "EEI_percent", "Label"]
+
+    row = {
+        "AEC_kWh_per_year": _fmt3(payload.get("AEC")) if payload else "",
+        "Volume_L": _fmt3(payload.get("net_volume_l")) if payload else "",
+        "M": _fmt3(payload.get("M")) if payload else "",
+        "N": _fmt3(payload.get("N")) if payload else "",
+        "SAEC": _fmt3(payload.get("SAEC")) if payload else "",
+        "EEI_percent": _fmt3(payload.get("EEI_percent")) if payload else "",
+        "Label": str(payload.get("label") or "") if payload else "",
+    }
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerow(row)
+
+
 def run_bsen22041(
     *,
     temp_file: Path,
@@ -141,13 +181,13 @@ def run_bsen22041(
     prefix: str = "aligned",
     compressor_on_threshold_w: float = 50.0,
     coverage_max_missing_percent: float = 0.5,
-    product_name: str | None = None,
     ta_col: str | None = None,
     ground_col: str | None = None,
     ceiling_col: str | None = None,
     rh_col: str | None = None,
     probe_distance_m: float = 2.5,
     stamp: str | None = None,
+    product_name: str | None = None,
 ) -> Bsen22041RunResult:
     stamp = stamp or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = out_dir / stamp
@@ -189,12 +229,7 @@ def run_bsen22041(
 
     # Coverage gate policy
     max_missing = float(coverage_max_missing_percent) / 100.0
-    required_temp_windows = {
-        "stable_24h",
-        "test_48h",
-        "test_first_24h",
-        "test_last_24h",
-    }
+    required_temp_windows = {"stable_24h", "test_48h", "test_first_24h", "test_last_24h"}
     required_power_windows = {"test_last_24h"}  # stable_24h not required for power
     warn_power_windows = {"test_48h", "test_first_24h"}
 
@@ -252,28 +287,16 @@ def run_bsen22041(
 
     if food_cols:
         plot_foodstuff_lines(
-            t_stable,
-            food_cols,
-            results_dir / "foodstuff_stable_24h.png",
-            title="Foodstuff temperatures (Stable 24h)",
+            t_stable, food_cols, results_dir / "foodstuff_stable_24h.png", title=""
         )
         plot_foodstuff_lines(
-            t_last,
-            food_cols,
-            results_dir / "foodstuff_test_last_24h.png",
-            title="Foodstuff temperatures (Test last 24h)",
+            t_last, food_cols, results_dir / "foodstuff_test_last_24h.png", title=""
         )
         plot_foodstuff_min_max_mean(
-            t_stable,
-            food_cols,
-            results_dir / "foodstuff_stable_24h_min_max_mean.png",
-            title="Foodstuff min / mean / max (Stable 24h)",
+            t_stable, food_cols, results_dir / "foodstuff_stable_24h_min_max_mean.png", title=""
         )
         plot_foodstuff_min_max_mean(
-            t_last,
-            food_cols,
-            results_dir / "foodstuff_test_last_24h_min_max_mean.png",
-            title="Foodstuff min / mean / max (Test last 24h)",
+            t_last, food_cols, results_dir / "foodstuff_test_last_24h_min_max_mean.png", title=""
         )
 
         compute_column_stats(t_stable, food_cols).to_csv(
@@ -303,7 +326,7 @@ def run_bsen22041(
             ground_col=g,
             ceiling_col=c,
             rh_col=rh,
-            title="Ambient Ta/Ground/Ceiling and RH (Test 48h)",
+            title="",
         )
         ambient_plot_path = str(ambient_plot)
     else:
@@ -334,28 +357,98 @@ def run_bsen22041(
         "test_last_24h": _temp_summary(t_last, food_cols),
     }
 
-    # -------- Product / SAEC / EEI / Label --------
-    product_payload = None
+    # ---------------------------
+    # Classification: climate class + food class + designation
+    # ---------------------------
+    classification_warnings: list[str] = []
+    climate_class: str | None = None
+    amb_mean_t: float | None = None
+    amb_mean_rh: float | None = None
 
-    # Mean food temp from test_last_24h summary (robust + matches your logic)
-    food_mean_c = None
+    if ta and rh and ta in t_test48.columns and rh in t_test48.columns:
+        amb_t = pd.to_numeric(t_test48[ta], errors="coerce").dropna()
+        amb_rh = pd.to_numeric(t_test48[rh], errors="coerce").dropna()
+        amb_mean_t = float(amb_t.mean()) if not amb_t.empty else None
+        amb_mean_rh = float(amb_rh.mean()) if not amb_rh.empty else None
+        climate_class, cw = classify_climate_class(
+            ambient_mean_c=amb_mean_t, rh_mean_percent=amb_mean_rh
+        )
+        classification_warnings.extend(cw)
+    else:
+        classification_warnings.append("Ambient columns missing; cannot classify CC4/CC5.")
+
+        food_class: str | None = None
     try:
-        food_mean_c = temp_summary["test_last_24h"]["overall"]["mean"]
+        overall = temp_summary["test_last_24h"]["overall"] or {}
+        per_probe = temp_summary["test_last_24h"]["per_probe"] or {}
+
+        per_probe_max: list[float] = []
+        per_probe_min: list[float] = []
+
+        for _, d in per_probe.items():
+            if not isinstance(d, dict):
+                continue
+            if d.get("max") is not None:
+                per_probe_max.append(float(d["max"]))
+            if d.get("min") is not None:
+                per_probe_min.append(float(d["min"]))
+
+        food_class, fw = classify_food_class(
+            overall_min_c=overall.get("min"),
+            overall_mean_c=overall.get("mean"),
+            overall_max_c=overall.get("max"),
+            per_probe_max_c=per_probe_max,
+            per_probe_min_c=per_probe_min,
+        )
+        classification_warnings.extend(fw)
     except Exception:
-        food_mean_c = None
+        classification_warnings.append("Could not compute food class (M1/L1).")
+
+    designation: str | None = None
+    if climate_class and food_class:
+        designation = f"{climate_class} {food_class}"
+    elif climate_class:
+        designation = f"{climate_class} ?"
+    elif food_class:
+        designation = f"? {food_class}"
+
+    # ---------------------------
+    # Product / SAEC / EEI / Label + temp-range warnings
+    # ---------------------------
+    product_payload: dict[str, Any] | None = None
+    class_warnings: list[str] = []
+
+    food_mean_c = None
+    food_overall_min = None
+    food_overall_max = None
+    try:
+        overall = temp_summary["test_last_24h"]["overall"]
+        if overall:
+            food_overall_min = overall.get("min")
+            food_mean_c = overall.get("mean")
+            food_overall_max = overall.get("max")
+    except Exception:
+        pass
 
     cabinet_class = classify_cabinet_by_food_mean(food_mean_c)
+    if cabinet_class:
+        class_warnings.extend(
+            check_food_temps_against_target(
+                cabinet_class=cabinet_class,
+                overall_min_c=food_overall_min,
+                overall_mean_c=food_mean_c,
+                overall_max_c=food_overall_max,
+            )
+        )
 
     if product_name and product_name in PRODUCTS and cabinet_class:
         spec = PRODUCTS[product_name]
-
-        # Only compute if volume is set sensibly
         if spec.net_volume_l and spec.net_volume_l > 0:
             M, N = saec_constants(cabinet_class)
-            saec = M * float(spec.net_volume_l) + N  # (your units)
+            saec = M * float(spec.net_volume_l) + N
             aec = float(power_results.kwh_per_day) * 365.0
             eei = (aec / saec) * 100.0 if saec > 0 else float("nan")
-            label = compute_energy_label(eei) if eei == eei else None
+            label = compute_energy_label(eei) if eei == eei else ""
 
             product_payload = {
                 "name": spec.name,
@@ -364,13 +457,15 @@ def run_bsen22041(
                 "height_mm": spec.height_mm,
                 "net_volume_l": float(spec.net_volume_l),
                 "food_mean_c": float(food_mean_c) if food_mean_c is not None else None,
-                "cabinet_class": cabinet_class,  # "fridge" / "freezer"
+                "food_min_c": float(food_overall_min) if food_overall_min is not None else None,
+                "food_max_c": float(food_overall_max) if food_overall_max is not None else None,
+                "cabinet_class": cabinet_class,
                 "M": float(M),
                 "N": float(N),
                 "SAEC": float(saec),
                 "AEC": float(aec),
                 "EEI_percent": float(eei),
-                "label": label,
+                "label": str(label),
             }
         else:
             product_payload = {
@@ -379,37 +474,15 @@ def run_bsen22041(
                 "depth_mm": spec.depth_mm,
                 "height_mm": spec.height_mm,
                 "net_volume_l": float(spec.net_volume_l),
-                "food_mean_c": float(food_mean_c) if food_mean_c is not None else None,
                 "cabinet_class": cabinet_class,
                 "warning": "Product volume not set (>0 required) so SAEC/EEI not computed.",
             }
 
-    # Write Energy Label CSV (single-row table)
-    try:
-        if (
-            product_payload
-            and "warning" not in product_payload
-            and product_payload.get("label") is not None
-        ):
-            csv_path = results_dir / "energy_label.csv"
-            with csv_path.open("w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(
-                    ["AEC_kWh_per_year", "Volume_L", "M", "N", "SAEC", "EEI_percent", "Label"]
-                )
-                w.writerow(
-                    [
-                        f"{float(product_payload['AEC']):.3f}",
-                        f"{float(product_payload['net_volume_l']):.3f}",
-                        f"{float(product_payload['M']):.3f}",
-                        f"{float(product_payload['N']):.3f}",
-                        f"{float(product_payload['SAEC']):.3f}",
-                        f"{float(product_payload['EEI_percent']):.3f}",
-                        str(product_payload["label"]),
-                    ]
-                )
-    except Exception as e:
-        warnings.append(f"Could not write energy_label.csv: {e}")
+    # Always write energy_label.csv (blank row if not computable)
+    _write_energy_label_csv(
+        results_dir,
+        product_payload if product_payload and "warning" not in product_payload else None,
+    )
 
     # Summary for GUI
     summary: dict[str, Any] = {
@@ -421,19 +494,18 @@ def run_bsen22041(
         "power_results": power_results.__dict__,
         "temp_summary": temp_summary,
         "ambient_gradient": gradient_payload,
+        "coverage_missing_frac": {"temp": qc.temp_missing_frac, "power": qc.power_missing_frac},
+        "warnings": {
+            "temp_parse": temp_rep.warnings,
+            "qc": qc.warnings,
+            "classification": (classification_warnings + class_warnings),
+        },
+        "detected_columns": {"Ta": ta, "Ground": g, "Ceiling": c, "RH": rh, "food": food_cols},
         "product": product_payload,
-        "coverage_missing_frac": {
-            "temp": qc.temp_missing_frac,
-            "power": qc.power_missing_frac,
-        },
-        "warnings": {"temp_parse": temp_rep.warnings, "qc": qc.warnings},
-        "detected_columns": {
-            "Ta": ta,
-            "Ground": g,
-            "Ceiling": c,
-            "RH": rh,
-            "food": food_cols,
-        },
+        "test_designation": designation,
+        "climate_class": climate_class,
+        "food_class": food_class,
+        "ambient_means": {"temp_c": amb_mean_t, "rh_percent": amb_mean_rh},
     }
 
     plots: dict[str, str | None] = {
